@@ -963,7 +963,8 @@ export async function bootstrap() {
         reconnect = false;
         // The restarted host may have new logs, config or readiness. Refresh
         // those facts in place while retaining conversations and unsent drafts.
-        void bootstrap();
+        // A reply the agent began by itself while the event stream was down was announced to no one: ask for it now.
+        void bootstrap().then(() => takeOverTurns());
         return;
       }
       set({ connection: status });
@@ -1988,7 +1989,7 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
   // A taken-over turn goes on in the reply the page already has (the last one, if it is the assistant's).
   const lastReply = reattach ? [...(state.sessions.find(s => s.id === sessionId)?.messages ?? [])].reverse()[0] : undefined;
   // A turn the agent started by itself (a background command finished) is a new reply, not the end of the last one.
-  const resumedReply = lastReply?.role === 'assistant' && !options.wake ? lastReply : undefined;
+  const resumedReply = lastReply?.role === 'assistant' && (!options.wake || lastReply.requestId === options.requestId) ? lastReply : undefined;
   let assistantId = resumedReply?.id ?? uid('m');
   const assistantMsg: ChatMessage = {
     id: assistantId,
@@ -2356,11 +2357,11 @@ async function resumeSessions() {
  * going away is asked about too: if its turn ended meanwhile, the host still holds the end of it and shows it whole; if not, nothing changes.
  */
 async function takeOverTurns() {
-  let running: { chatId: string }[] = [];
+  let running: { chatId: string; requestId?: string; wake?: boolean }[] = [];
   let woken: { chatId: string; requestId: string }[] = [];
-  try { const active = await api.get<{ turns: { chatId: string }[]; woken?: { chatId: string; requestId: string }[] }>('/api/chat/active'); running = active.turns; woken = active.woken ?? []; } catch { /* an older host, or none reachable: nothing to take over */ }
+  try { const active = await api.get<{ turns: { chatId: string; requestId?: string; wake?: boolean }[]; woken?: { chatId: string; requestId: string }[] }>('/api/chat/active'); running = active.turns; woken = active.woken ?? []; } catch { /* an older host, or none reachable: nothing to take over */ }
   const live = new Set(running.map(t => t.chatId));
-  for (const id of live) if (state.sessions.some(s => s.id === id) && !liveTurns.has(id)) void sendMessage('', { reattach: id });
+  for (const t of running) if (state.sessions.some(s => s.id === t.chatId) && !liveTurns.has(t.chatId)) void sendMessage('', { reattach: t.chatId, ...(t.wake && t.requestId ? { requestId: t.requestId, wake: true } : {}) });
   // Replies the agent began by itself while no page was open (a background command finished), read whole.
   for (const w of woken) if (state.sessions.some(s => s.id === w.chatId) && !liveTurns.has(w.chatId) && !live.has(w.chatId)) void sendMessage('', { reattach: w.chatId, requestId: w.requestId, wake: true });
   // Cut-off replies of chats with no turn running: the most recent few, asked once each.

@@ -35,7 +35,12 @@ export function watchForWake({ gw, sessionId, onWake, maxMs = 2 * 60 * 60_000 })
   stream = gw.openStream('session/follow', { request: { address: { kind: 'session', sessionId }, assistantStream: true } }, {
     onItem: item => {
       if (done) return;
-      if (item.type === 'snapshot') { if (!ready) { ready = true; cursor = item.cursor ?? -1; } return; }
+      // A re-opened stream (the socket came back) starts with a fresh snapshot: a turn that began while it was away is in its records.
+      if (item.type === 'snapshot') {
+        if (!ready) { ready = true; cursor = item.cursor ?? -1; return; }
+        for (const r of item.records ?? []) if (r?.type === 'event') see(r.event);
+        return;
+      }
       if (item.type === 'event') see(item.event);
     },
     onError: () => close(),

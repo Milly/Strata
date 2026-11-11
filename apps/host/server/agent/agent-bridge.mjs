@@ -23,7 +23,7 @@ import { GatewayClient } from './gateway-client.mjs';
 import { HarnessProcess, resolveHarness, redact, stopStaleAgent } from './harness-runtime.mjs';
 import { StatusReporter } from './status.mjs';
 import { buildProfile, routeFor, MODE_PRESETS, modeOf, effortOf, localOutputBudget, compactionHeadroom } from './profile.mjs';
-import { TurnProjector, parseArguments as parseArgs } from './events.mjs';
+import { TurnProjector, parseArguments as parseArgs, baselineItems } from './events.mjs';
 import { ChildProjector } from './children.mjs';
 import { nearestBudget } from './llm-shape.mjs';
 import { DeliverableTracker, ActivityGroups, FolderClaims } from './deliverables.mjs';
@@ -475,7 +475,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       }
     }
 
-    const projector = new TurnProjector({ policy: MODE_PRESETS[appliedMode].approval, window: route.contextWindow });
+    const projector = new TurnProjector({ policy: MODE_PRESETS[appliedMode].approval, window: route.contextWindow, catchUp: !!adopt });
     if (!goal) guard = new TurnGuard({ plan: !!planTask, contextMax: route.kind === 'local' ? route.contextWindow : 0 });   // a saved connection's window is often only assumed: never judged by a guess
     projector.onStatus = update => { if (!turn?.parentOpen && turn?.children.size && [...turn.children.values()].some(h => !h.done) && update.phase === 'waiting') return; reporter.set(update); };
     const turn = {
@@ -485,10 +485,10 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       // Helper agents (subagents) the Harness started for this chat, and the state of the run around them.
       children: new Map(), subagentCalls: new Map(), parentOpen: false, stopping: false, settleTimer: null, mode: appliedMode,
       plan: null, advancing: false, goalRun: false, lastActivity: Date.now(), heard: Date.now(), engineMark: null, watchdog: null,
-      research: researchTopic ? { phase: 'gather', nudged: false, waitingStart: false } : null,
+      research: researchTopic ? { phase: 'gather', nudged: false, waitingStart: false } : null, wake: !!adopt,
     };
     c.turn = turn;
-    if (adopt) onWake(chatId, requestId);
+    if (adopt) { log(`agent · ${chatId}: the agent started a turn by itself (a background job finished); following it as ${requestId}`); onWake(chatId, requestId); }
     if (workspacePath) folderClaims.begin(workspacePath, chatId);
     /**
      * A page that comes back (a reload, a new window) takes the running turn over again. Everything that was said while no page was there is
@@ -586,6 +586,8 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
         if (item.type === 'snapshot') {
           if (turn.lastSeq < 0) turn.lastSeq = item.cursor;
           else for (const r of item.records ?? []) if (r.type === 'event' && r.event.seq > turn.lastSeq) handle({ type: 'event', event: r.event });
+          // A turn the Harness started by itself may be mid-reply when this follow opens: the text so far comes from the snapshot, once.
+          if (adopt && !turn.caughtUp) { turn.caughtUp = true; for (const b of baselineItems(item.assistantStream)) handle(b); }
           turn.snapshot.resolve();
           return;
         }
@@ -1453,7 +1455,7 @@ ${note.text}
   function turnOf(chatId) {
     const t = chats.get(chatId)?.turn;
     if (!t || t.finished) return null;
-    return { chatId, sessionId: t.sessionId, requestId: t.requestId, mode: t.mode, stopping: !!t.stopping, pending: pendingFor(chatId) };
+    return { chatId, sessionId: t.sessionId, requestId: t.requestId, mode: t.mode, stopping: !!t.stopping, wake: t.wake, pending: pendingFor(chatId) };
   }
   /** Chats whose reply to a turn the agent started by itself ended while no page was attached: [{ chatId, requestId }]. */
   function wokenTurns() { return [...chats.entries()].filter(([, c]) => c.last?.wake && !c.last.taken && !c.turn).map(([chatId, c]) => ({ chatId, requestId: c.last.requestId })); }
