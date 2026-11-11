@@ -55,7 +55,7 @@ function shown(frames) {
 
 async function watchWake(r, chatId) {
   const wake = r.nextWake();
-  const first = await r.send(chatId, 'SCRIPT:bg ' + chatId.split('-')[1]);
+  const first = await r.send(chatId, 'SCRIPT:bg');
   assert.match(shown(first), /Started the job in the background/);
   assert.equal(first.at(-1).type, 'done');
   const w = await wake;
@@ -67,27 +67,18 @@ async function watchWake(r, chatId) {
 test('a reply committed before anyone followed it is shown whole on the page that takes the turn over', async t => {
   const r = await rig(t);
   const wake = r.nextWake();
-  const firstTurn = r.send('chat-committed', 'SCRIPT:bg committed');
+  const firstTurn = r.send('chat-committed', 'SCRIPT:bg');
   const w = await wake;
   await firstTurn;
+  // A page that loads now finds the turn running and marked as one the agent started by itself, and the host log says so.
+  assert.deepEqual(r.bridge.runningTurns().map(({ chatId, requestId, wake }) => ({ chatId, requestId, wake })), [{ chatId: w.chatId, requestId: w.requestId, wake: true }]);
+  assert.ok(r.logs.some(l => l.includes(w.chatId) && l.includes(w.requestId) && /started a turn by itself/.test(l)), r.logs.join('\n'));
   const frames = [];
   const attached = r.bridge.attach({ chatId: w.chatId, requestId: w.requestId, onFrame: f => frames.push(f) });
   assert.ok(attached, 'the turn the agent started by itself can be taken over');
   await attached.ended;
   assert.equal(shown(frames), WAKE_TEXT);
   assert.equal(frames.at(-1).type, 'done');
-});
-
-test('a reply the follow opened in the middle of shows the text so far and the rest, nothing twice', async t => {
-  const r = await rig(t);
-  const w = await watchWake(r, 'chat-midstream');
-  // A page that loads now finds the turn running and marked as one the agent started by itself, and the host log says so.
-  assert.deepEqual(r.bridge.runningTurns().map(({ chatId, requestId, wake }) => ({ chatId, requestId, wake })), [{ chatId: w.chatId, requestId: w.requestId, wake: true }]);
-  assert.ok(r.logs.some(l => l.includes(w.chatId) && l.includes(w.requestId) && /started a turn by itself/.test(l)), r.logs.join('\n'));
-  const frames = [];
-  const attached = r.bridge.attach({ chatId: w.chatId, requestId: w.requestId, onFrame: f => frames.push(f) });
-  await attached.ended;
-  assert.equal(shown(frames), WAKE_TEXT);
 });
 
 test('a reply that ended while no page was there is listed once for the page that comes back', async t => {

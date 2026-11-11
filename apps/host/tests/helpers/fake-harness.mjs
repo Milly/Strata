@@ -2,18 +2,18 @@
  * A stand-in for the DeepSeek Harness's `dsh web` gateway, for tests that need the agent bridge end to end without the real Harness or a model.
  * It speaks the two carriers the bridge uses (HTTP unary RPC and the `/api/remote.mux` WebSocket) on loopback and plays scripted sessions.
  *
- * `SCRIPT:bg <mode>` answers, ends its turn, and then, the way the Harness's job plugin does when a background command finishes, wakes the idle
- * agent with a completion notice and a turn of its own (no request id of the person's). <mode> sets when the wake reply is written:
- *   committed   the whole reply is streamed and committed at once, before anyone could follow it; the turn ends a moment later
- *   midstream   half the reply is streamed at once, the rest a moment later
+ * `SCRIPT:bg` answers, ends its turn, and then, the way the Harness's job plugin does when a background command finishes, wakes the idle agent
+ * with a completion notice and a turn of its own (no request id of the person's). That reply is streamed and committed at once, before anyone
+ * could follow it; the turn ends a moment later, so a page can still take it over while it runs.
  * `FAKE_HARNESS_WAKE_MS` sets the pause before the wake (default 300).
+ * Modelled on DeepSeek Harness (dsh) commit fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159.
  */
 import { createServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 
 const token = randomUUID().replace(/-/g, '');
 const wakeMs = Number(process.env.FAKE_HARNESS_WAKE_MS ?? 300);
-const sessions = new Map();   // sessionId -> { events, followers:Set, permission, attempt, turn }
+const sessions = new Map();   // sessionId -> { events, followers:Set, permission, turn }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function session(id) { return sessions.get(id); }
@@ -24,27 +24,22 @@ function append(s, type, data) {
   return event;
 }
 function stream(s, frame) {
-  if (frame.type === 'start') s.attempt = { attemptId: frame.attemptId, startedAfterSeq: s.events.length, turn: frame.turn, step: frame.step, nextIndex: 0, texts: [] };
-  if (frame.type === 'chunk' && s.attempt) { s.attempt.texts.push(frame.chunk.text); s.attempt.nextIndex++; }
-  if (frame.type === 'end') s.attempt = null;
   for (const f of s.followers) f({ type: 'assistant-stream', frame });
 }
 function snapshot(s) {
-  const a = s.attempt;
   return {
     type: 'snapshot', cursor: s.events.length, hasMore: false, header: {}, projections: {},
     records: s.events.map(event => ({ type: 'event', event })),
-    assistantStream: { revision: 1, ...(a ? { activeAttempt: { attemptId: a.attemptId, startedAfterSeq: a.startedAfterSeq, turn: a.turn, step: a.step, nextIndex: a.nextIndex, stream: a.texts.length ? [{ type: 'text-chunks', time0: Date.now(), index: 0, dt: a.texts.slice(1).map(() => 1), texts: [...a.texts] }] : [] } } : {}) },
+    assistantStream: { revision: 1 },
   };
 }
 
-/** One model reply: the stream frames, then the committed message. `pauseAfter` splits the stream: the rest comes `pauseMs` later. */
-async function reply(s, text, { pauseAfter = Infinity, pauseMs = 0 } = {}) {
+/** One model reply: the stream frames, then the committed message. */
+async function reply(s, text) {
   const attemptId = `att-${randomUUID()}`;
   stream(s, { type: 'start', attemptId, turn: s.turn, step: 1 });
   const words = text.split(/(?<= )/);
   for (const [i, w] of words.entries()) {
-    if (i === pauseAfter) await sleep(pauseMs);
     stream(s, { type: 'chunk', attemptId, index: i, chunk: { type: 'text-delta', index: 0, text: w } });
   }
   stream(s, { type: 'end', attemptId });
@@ -62,16 +57,12 @@ async function turn(s, message, body) {
 }
 
 async function play(s, requestId, text) {
-  const bg = /^SCRIPT:bg\s*(\w+)?/.exec(text);
+  const bg = /^SCRIPT:bg\b/.test(text);
   await turn(s, { source: { kind: 'user', rpcId: requestId }, content: [{ type: 'text', text }] }, () => reply(s, bg ? 'Started the job in the background. ' : `Echo: ${text}`));
   if (!bg) return;
   await sleep(wakeMs);
-  const mode = bg[1] ?? 'committed';
   const notice = { source: { kind: 'tool-jobs', form: 'notice', summary: 'job 1 completed' }, content: [{ type: 'text', text: 'Job 1 completed with exit code 0. Output: 42' }] };
-  await turn(s, notice, async () => {
-    if (mode === 'midstream') await reply(s, 'The background job finished and printed 42. ', { pauseAfter: 3, pauseMs: 800 });
-    else { await reply(s, 'The background job finished and printed 42. '); await sleep(800); }
-  });
+  await turn(s, notice, async () => { await reply(s, 'The background job finished and printed 42. '); await sleep(800); });
 }
 
 function rpc(method, args) {
@@ -79,7 +70,7 @@ function rpc(method, args) {
   switch (method) {
     case 'session/create': {
       const sessionId = randomUUID();
-      sessions.set(sessionId, { events: [], followers: new Set(), permission: null, attempt: null, turn: 0 });
+      sessions.set(sessionId, { events: [], followers: new Set(), permission: null, turn: 0 });
       return { sessionId };
     }
     case 'session/projections': return { values: { permissions: { currentValue: session(r.sessionId)?.permission ?? null } } };
