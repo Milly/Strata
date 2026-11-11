@@ -22,6 +22,7 @@ async function rig(t) {
   const root = mkdtempSync(join(tmpdir(), 'strata-wake-'));
   const ws = join(root, 'ws'); mkdirSync(ws, { recursive: true });
   const wakes = [];
+  const logs = [];
   let onWake = () => {};
   const bridge = createAgentBridge({
     dataDir: join(root, 'data'),
@@ -29,6 +30,7 @@ async function rig(t) {
     connections: () => [],
     env: { ...process.env, STRATA_HARNESS_DIR: fakeHarnessDir(root) },
     startTimeoutMs: 20_000,
+    log: line => logs.push(line),
     onWake: (chatId, requestId) => { wakes.push({ chatId, requestId }); onWake(chatId, requestId); },
   });
   t.after(async () => { await bridge.close(); try { rmSync(root, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } });
@@ -38,7 +40,7 @@ async function rig(t) {
     return frames;
   };
   const nextWake = () => new Promise(resolve => { onWake = (chatId, requestId) => { onWake = () => {}; resolve({ chatId, requestId }); }; });
-  return { bridge, send, nextWake, wakes };
+  return { bridge, send, nextWake, wakes, logs, ws };
 }
 
 /** What the page shows for a taken-over turn: the catch-up text, then every live piece. */
@@ -79,6 +81,9 @@ test('a reply committed before anyone followed it is shown whole on the page tha
 test('a reply the follow opened in the middle of shows the text so far and the rest, nothing twice', async t => {
   const r = await rig(t);
   const w = await watchWake(r, 'chat-midstream');
+  // A page that loads now finds the turn running and marked as one the agent started by itself, and the host log says so.
+  assert.deepEqual(r.bridge.runningTurns().map(({ chatId, requestId, wake }) => ({ chatId, requestId, wake })), [{ chatId: w.chatId, requestId: w.requestId, wake: true }]);
+  assert.ok(r.logs.some(l => l.includes(w.chatId) && l.includes(w.requestId) && /started a turn by itself/.test(l)), r.logs.join('\n'));
   const frames = [];
   const attached = r.bridge.attach({ chatId: w.chatId, requestId: w.requestId, onFrame: f => frames.push(f) });
   await attached.ended;
@@ -101,7 +106,11 @@ test('the chat takes the next message after the reply it wrote by itself, and wa
   const r = await rig(t);
   const w = await watchWake(r, 'chat-committed');
   for (let i = 0; i < 100 && r.bridge.isRunning(w.chatId); i++) await new Promise(res => setTimeout(res, 50));
-  assert.match(shown(await r.send(w.chatId, 'hello')), /Echo: hello/);
+  const frames = [];
+  let marked;
+  await r.bridge.runTurn({ chatId: w.chatId, message: 'hello', workspacePath: r.ws, mode: 'bypass', onFrame: f => { frames.push(f); if (f.type === 'start') marked = r.bridge.runningTurns().find(x => x.chatId === w.chatId)?.wake; } });
+  assert.equal(marked, false, 'a turn the person started is not marked');
+  assert.match(shown(frames), /Echo: hello/);
   const again = await watchWake(r, 'chat-committed');
   assert.notEqual(again.requestId, w.requestId);
   assert.equal(r.wakes.length, 2);

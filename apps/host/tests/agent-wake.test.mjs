@@ -53,6 +53,21 @@ test('a lost stream or the time limit closes the watch without waking anything',
   assert.deepEqual(woke, []);
 });
 
+test('a turn that began while the socket was away is found in the snapshot of the re-opened stream', () => {
+  const gw = fakeGateway(); const woke = [];
+  watchForWake({ gw, sessionId: 's', onWake: s => woke.push(s) });
+  gw.snapshot(10);
+  // The gateway client re-opens the follow after a reconnect: a fresh snapshot, with what happened meanwhile in its records.
+  gw.handlers.onItem({ type: 'snapshot', cursor: 14, records: [
+    { type: 'event', event: { seq: 9, type: 'turn/start', data: {} } },
+    { type: 'event', event: { seq: 11, type: 'usage', data: {} } },
+    { type: 'event', event: { seq: 12, type: 'turn/start', data: {} } },
+    { type: 'event', event: { seq: 13, type: 'user/message', data: {} } },
+  ] });
+  assert.deepEqual(woke, [12], 'the first new turn, once; nothing from before the watch opened');
+  assert.equal(gw.closed, 1);
+});
+
 test('closing it by hand is final', () => {
   const gw = fakeGateway(); const woke = [];
   const w = watchForWake({ gw, sessionId: 's', onWake: s => woke.push(s) });
